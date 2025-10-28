@@ -1,4 +1,4 @@
-# LoadDelta - Deltaテーブル読込モジュール Lv1
+# Deltaテーブル基本操作 Lv1
 
 ## 仕様説明
 
@@ -15,13 +15,10 @@
 - 必須 : 対象テーブルに SELECT できること
 - 任意 : USE CATALOG / USE SCHEMA できること
 
-**出力**
-- display(df) のプレビュー
-- df.columns
-- printSchema()
+**参考**
+- [チュートリアル: Apache Spark DataFrame を使用してデータを読み込んで変換する](https://learn.microsoft.com/ja-jp/azure/databricks/getting-started/dataframes)
 
-**備考**
-- ウィジェット・条件・LIMIT・キャッシュ等は Lv2 以降で拡張予定
+
 
 ## 実装
 
@@ -30,15 +27,34 @@
 ```
 from pyspark.sql import DataFrame
 
-# === 定数（ここだけ編集） ===
-CATALOG = "main"
-SCHEMA  = "default"
-TABLE   = "sample_delta"
+# === 入力テーブル1 ===
+SRC1_CATALOG = "main"
+SRC1_SCHEMA  = "default"
+SRC1_TABLE   = "sample_delta_1"
+
+# === 入力テーブル2 ===
+SRC2_CATALOG = "main"
+SRC2_SCHEMA  = "default"
+SRC2_TABLE   = "sample_delta_2"
+
+# === 不要列（確認してから必要に応じて編集） ===
+DROP_COLS_1 = []  # 例: ["raw_ts", "ingest_file"]
+DROP_COLS_2 = []  # 例: ["note"]
+
+# === 結合設定 ===
+JOIN_KEYS  = ["id"]   # 例: 共通キー列名
+JOIN_TYPE  = "inner"  # 例: "inner" / "left" / "right" / "full"
+
+# === 出力（保存先 Delta テーブル） ===
+DST_CATALOG = "main"
+DST_SCHEMA  = "mart"
+DST_TABLE   = "joined_sample"
+SAVE_MODE   = "overwrite"  # "overwrite" or "append"
 ```
 
-### 関数モジュール
+### 共通モジュール
 
-#### 完全修飾名の作成関数
+#### 完全修飾名の組立て関数
 
 ```
 def _fq_name(cat: str, sch: str, tbl: str) -> str:
@@ -56,28 +72,88 @@ def load_delta(cat: str = CATALOG, sch: str = SCHEMA, tbl: str = TABLE):
     return spark.table(fq)
 ```
 
-### 実行する
+### ロードする
 
 ```
-df = load_delta()  # 定数で指定したテーブルをロード
+# 定数で指定したテーブルをロード
+df1 = load_delta(SRC1_CATALOG, SRC1_SCHEMA, SRC1_TABLE)
+df2 = load_delta(SRC2_CATALOG, SRC2_SCHEMA, SRC2_TABLE)
 ```
 
 ### プレビューする
 
+- プレビュー結果を見て、不要な列を選定します
+
 ```
-# 先頭5行
-df.show(5, truncate=False)
+print("=== SRC1 Columns ===")
+print(df1.columns)
+df1.show(5, truncate=False)
+display(df1)
+df1.printSchema()
 
-# 表形式プレビュー
-display(df)
-
-# ヘッダ（列名）とスキーマ
-print("=== Columns ===")
-print(df.columns)
-
-print("\n=== Schema ===")
-df.printSchema()
+print("\n=== SRC2 Columns ===")
+print(df2.columns)
+df2.show(5, truncate=False)
+display(df2)
+df2.printSchema()
 ```
+
+### 不要列を削除する
+
+```
+# 不要列を削除する
+if DROP_COLS_1:
+    df1 = df1.drop(*DROP_COLS_1)
+
+if DROP_COLS_2:
+    df2 = df2.drop(*DROP_COLS_2)
+
+# 確認する
+print("=== After Drop SRC1 Columns ===")
+print(df1.columns)
+print("\n=== After Drop SRC2 Columns ===")
+print(df2.columns)
+```
+
+### 結合する
+
+```
+# JOIN_KEYS が存在するか確認
+missing_1 = [c for c in JOIN_KEYS if c not in df1.columns]
+missing_2 = [c for c in JOIN_KEYS if c not in df2.columns]
+if missing_1 or missing_2:
+    raise ValueError(f"Join key not found. df1 missing={missing_1}, df2 missing={missing_2}")
+
+df_joined = df1.join(df2, on=JOIN_KEYS, how=JOIN_TYPE)
+
+print("=== Joined Columns ===")
+print(df_joined.columns)
+df_joined.show(10, truncate=False)
+```
+
+### Deltaテーブルに保存する
+
+```
+dst_fq = _fq_name(DST_CATALOG, DST_SCHEMA, DST_TABLE)
+
+# テーブルとして保存（Unity Catalog配下を想定）
+# 既存テーブルに上書きする場合は SAVE_MODE="overwrite"
+df_joined.write.format("delta").mode(SAVE_MODE).saveAsTable(dst_fq)
+
+print(f"Saved to {dst_fq} (mode={SAVE_MODE})")
+
+# 保存結果を確認
+df_out = spark.table(dst_fq)
+print("=== Output Preview ===")
+df_out.show(10, truncate=False)
+
+print("\n=== Output Schema ===")
+df_out.printSchema()
+```
+
+- [pyspark.sql.DataFrame](https://api-docs.databricks.com/python/pyspark/latest/pyspark.sql/api/pyspark.sql.DataFrame.html#pyspark-sql-dataframe)
+- [pyspark.sql.DataFrameWriter.saveAsTable](https://api-docs.databricks.com/python/pyspark/latest/pyspark.sql/api/pyspark.sql.DataFrameWriter.saveAsTable.html#pyspark-sql-dataframewriter-saveastable)
+
 
 ## 参考
 
