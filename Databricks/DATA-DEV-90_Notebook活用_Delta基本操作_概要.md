@@ -2,26 +2,28 @@
 
 ## テーマ / ゴール
 
-### Lv1 最小のデータ操作
-- 定数 CATALOG/SCHEMA/TABLE を使って Delta テーブルを読み
-- 先頭行・ヘッダ・スキーマを確認できる
+### Lv1 最小実装（骨格）
+- コード内定数で 2テーブルをロード
+- 不要列ドロップ→結合→保存してプレビュー
 
-### Lv2 パラメータ化ロード & 基本前処理
-- ウィジェットでテーブル/列/条件/LIMITを切替える
-- 軽い整形（型変換・列追加）まで
+### Lv2 操作性と堅牢性の底上げ
+- ウィジェット入力
+- 同じ骨格をパラメータで切替して実行
 
-### Lv3 ファイル取込→Delta化
-- UC Volumes
-- 外部ロケーションのファイル（CSV/JSON/Parquet）を読む
-- Deltaテーブルに保存
+### Lv3 環境変数ベースの自動実行
+- Jobs/環境設定
+- 同じ骨格を環境編集（ジョブ／クラスターの環境変数）で駆動
 
-### Lv4 加工・編集＆増分対応
-- 正規化/結合/集約
-- 差分ファイルでUpsert（MERGE）
+### Lv4 外部設定ファイル駆動
+- UC Volumes/DBFSのJSON等
+- GitHub/CIで“設定を配布
+- 同じ骨格を設定ファイルで一元管理
 
-### Lv5 本番保存（Gold）＆運用
-- 書込みモード/特性を理解する
-- 品質ゲート・権限・監視を備えたジョブ化
+### Lv5 制御用テーブル駆動
+- Unity Catalogの制御TBL
+- GitHub/CI/CDで“定義もデプロイ
+- 同じ骨格をDeltaの制御レコードで制御
+- 品質ゲートと通知を付加
 
 
 ## ユースケース例
@@ -32,62 +34,59 @@
 - 後続の加工に備えた目視チェック
 
 ### Lv2
-- 同じカタログで複数のテーブルを試す
-- サンプル抽出
+- 手動探索でテーブルや結合キーを都度変更
 
 ### Lv3
-- 外部提供データの初期ロード
+- 夜間ジョブでの定型処理
 
 ### Lv4
-- ログ/トランザクションの日次更新
-- 参照マスタとの結合
+- 環境差分をファイルで管理・配布
 
 ### Lv5
-- 夜間バッチ
-- ダッシュボード向けサマリの確定保存
+- 本番運用・監査
 
 ## ノートブックの主な工程
 
 ### Lv1
-  1. 仕様と定数宣言（CATALOG/SCHEMA/TABLE）
-  2. （任意）USE CATALOG/USE SCHEMA
-  3. load_delta() 定義（完全修飾名で読込）
-  4. 実行：df = load_delta() 
-  5. プレビュー：df.show()/display(df) 
-  6. 不要列の削除
-  7. データ結合
-  8. データ保存
+  1. 設定入力：コード内定数
+  2. load_delta()
+  3. df1/df2読込
+  4. show/printSchema/display
+  5. drop()
+  6. join()
+  7. saveAsTable()
+  8. 保存結果のプレビュー
 
 ### Lv2
-  1. 仕様/前提
-  2. dbutils.widgetsで catalog/schema/table/columns/where/limit 
-  3. （任意）USE CATALOG/SCHEMA
-  4. load_delta拡張（select/where/limit）
-  5. 軽い加工（withColumn, cast）
-  6. プレビュー&ヘッダ
+  1. 設定入力：dbutils.widgets（cat/sch/tbl・drop列・joinキー・mode）
+  2. 入力取得→検証
+  3. Lv1と同じ処理
+  4. 結果出力
 
 ### Lv3
-  1. 入出力パラメータ（パス/テーブル名/書込みモード）
-  2. spark.readでファイル読込（必要なoption設定）
-  3. スキーマ確認
-  4. write or saveAsTable（Delta化）
-  5. 保存後読み直し＆プレビュー
+  1. 設定入力：環境変数／spark.conf（os.environ.get/spark.conf.get）
+  2. パラメータ解決とデフォルト
+  3. Lv2相当の検証
+  4. Lv1同処理
+  5. 実行ログ（print）
 
 ### Lv4
-  1. ソース読込（Bronze）
-  2. クレンジング（trim/null処理/重複排除）
-  3. 結合・集約（join,groupBy）
-  4. キー設計（主キー/ハッシュ）
-  5. MERGE INTOでUpsert（更新/挿入/論理削除）
-  6. 結果検証
+  1. 設定入力：外部設定ファイル（JSON想定）
+  2. dbutils.fs.open→json.loads でロード
+  3. スキーマ検証（必須キー）
+  4. Lv2相当の検証
+  5. Lv1同処理
+  6. 結果出力
 
 ### Lv5
-  1. ジョブ引数→ウィジェット受け（再利用）
-  2. 加工済DFをDelta保存（mode, partitionBy）
-  3. 品質ゲート（閾値未達で失敗）
-  4. 権限（UCのGRANT戦略、所有者）
-  5. ジョブ/ワークフロー設定（リトライ・通知）
-  6. メトリクス記録（処理件数/秒/件）
+  1. 設定入力：制御用TBL
+    - spark.table("cat.sch.ctrl") をクエリ）
+    - pipeline_id/env/effective_from/params_json など
+  2. 現行行を選択
+  3. params_json を展開
+  4. 品質ゲート（件数>0、重複=0、NULL率<閾値 等）
+  5. Lv1同処理
+  6. 成否を制御TBLに記録
 
 ## 主要API / 機能
 
@@ -99,39 +98,26 @@
 - 完全修飾名 `catalog`.`schema`.`table`
 
 ### Lv2
-- dbutils.widgets
-- spark.table
-- select
-- where
-- limit
-- withColumn
-- cast
-- display
+- dbutils.widgets.text
+- dropdown
+- widgets.get
+- withColumn(必要時の軽い型合わせ)
 
 ### Lv3
-
-- spark.read.csv
-- json
-- parquet
-- option(header,inferSchema,escape)
-- `write.format("delta").mode("append")
+- os.environ
+- spark.conf.get/set
+- Jobsのスケジュール（※ノート側は取得のみ）
 
 ### Lv4
-- dropDuplicates
-- join
-- groupBy
-- agg
-- MERGE INTO
-- when
-- 監査列（ingest_ts,source_file）
+- dbutils.fs
+- json
+- UC Volumes（設定の配置先）
 
 ### Lv5
-- write.format("delta").mode(...)
-- partitionBy
-- テーブル特性（tblproperties）
-- Unity Catalog権限（USE/SELECT/MODIFY）
-- Workflows/Jobs
-- Secrets
+- spark.table
+- JSON展開（from_json or Python json）
+- 品質チェックはassert相当
+- （必要に応じJobsの通知設定）
 
 ## 品質・バリデーション
 
@@ -141,22 +127,23 @@
 - エラー時に TABLE NOT FOUND などの基本診断
 
 ### Lv2
-- 行数チェック
-- NULL/ユニーク件数の簡易集計（count, countDistinct）
+- 安全ドロップ（存在列のみ削除）
+- 結合前のキー型一致チェック
+- 件数ログ（count）
 
 ### Lv3
-- overwrite").saveAsTable
-- UC Volumes
+- 必須パラメータ欠落時に停止
+- ログに入力値・行数・出力先を記録
 
 ### Lv4
-- 期待件数・更新/挿入/削除件数の記録
-- 重複キー検知
-- 差分の整合性チェック
+- 設定スキーマ検証（必須キー・型）
+- 設定のバージョン（config_version）
+- ログ出力
 
 ### Lv5
-- 期待件数・NULL率・重複率の閾値
-- 違反時はジョブ停止＆通知
-- 監査列の保存
+- 閾値違反でジョブ失敗（静かに壊れない）
+- 制御TBLへ実行結果ログ（件数・開始/終了時刻）
+
 
 ## パフォーマンス・運用
 
@@ -166,55 +153,61 @@
 - 最小セル数で共有しやすく（%run で再利用可能）
 
 ### Lv2
-- df.cache()とunpersist()の基礎
-- count()でマテリアライズ
+- 再実行の見通し向上（パラメタライズ）
+- 必要時のみ df.cache()→unpersist()
 
 ### Lv3
-- 必須列の有無・重複行検知
-- 読込/書込件数突合
-- 欠損率のしきい値チェック
+- 手動→自動へ
+- 環境で切替できるためノートは不変
+- 失敗時の再実行が容易
 
 ### Lv4
-- パーティション設計
-- ZORDERの考え方
-- OPTIMIZE/VACUUMの運用
-- schemaEvolutionの注意
+- GitHub 版管理
+- CIで設定を配布（dev→stg→prd）
+- ノートは不変
+- Jobs で自動実行
 
 ### Lv5
-- スケジュール/リトライ/失敗通知
-- メタデータ管理（所有者/説明）
-- 保存後のOPTIMIZEの自動化
+- 設定＝データなので監査・ロールバック容易
+- GitHub/CI/CDで制御TBLのDDL
+- Seedデータも管理
+- 通知（Workflows）
+- スケジュール
+- リトライ
+- メトリクス整備
+
 
 ## 成果物 / 演習課題
 
 ### Lv1
-- 成果物：Lv1ノートブック本体（関数＋実行の2セル）
-- 演習
+**成果物**
+- Lv1ノートブック本体（関数＋実行の2セル）
+
+**演習**
   1. CATALOG/SCHEMA/TABLE を自環境に合わせ実行 
   2. 予約語/ハイフン含むテーブル名をバッククォートで読み込む
   3. display のグリッド統計と printSchema の型が一致しているか確認
 
 ### Lv2
-- 演習
-  - 3つのテーブルを切替
-  - 列型を狙いどおりに揃え
-  - LIMIT付きでプレビュー
+**演習**
+- 3種類の入力で連続実行→すべて成功
+- 欠損キー時に早期エラーを出せること
 
 ### Lv3
-- overwriteSchemaの扱い
-- partitionBy入門
-- OPTIMIZE/VACUUMの触り
+**演習**
+- Jobsで環境を dev/stg 切替実行
+- 出力先が切り替わること
 
 ### Lv4
-- 演習
-  - 日次差分をMERGEで取り込み
-  - 更新/挿入/削除件数をログに残す
-  - 重複キーを検出して失敗させるオプション
+**演習**
+- 設定JSON( dev / stg ) をブランチで管理
+- CIでVolumesへ配布
+- Jobsで実行
 
 ### Lv5
-- 演習
-  - JobsでLv4の処理を実行する
-  - 品質違反で失敗→通知する
-  - UCの最小権限付与で動くことを確認
+**演習**
+- 制御TBLの行を差し替え
+- 次回実行で出力先/モードが切替
+- 品質ゲート違反で失敗になること
 
 

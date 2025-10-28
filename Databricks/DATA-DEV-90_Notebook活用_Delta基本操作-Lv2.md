@@ -1,296 +1,222 @@
-# LoadDelta - UC Delta テーブル読込テンプレート
+# Deltaテーブル基本操作 Lv2 widgets入力版
 
-## 仕様説明（LoadDelta）
+## 概要
 
-```
-# %md
-# LoadDelta — UC Delta テーブル読込テンプレ
-# 目的
-#   - Unity Catalog 配下の Delta テーブルを Python（PySpark）でロードし、DataFrame として表示・検査する
-# 主な機能
-#   - カタログ/スキーマ/テーブル名を Widgets で指定（既定値あり）
-#   - SELECT 列の絞り込み、WHERE 句、LIMIT を任意で指定
-#   - spark.table() を利用した メタストア名指定の読込（catalog.schema.table）
-#   - プレビュー表示（display/show）、件数、スキーマ、簡易プロファイル
-#   - オプションで キャッシュ（CACHE TABLE または df.cache()）
-# 前提
-#   - Databricks Runtime（Delta Lake 同梱）
-#   - 対象テーブルへの 参照権限（USE CATALOG / USE SCHEMA / SELECT）
-# 想定ユース
-#   - データ探索／品質確認 下流ノートブックに渡す一時ビュー登録（createOrReplaceTempView）
-# 出力
-#   - DataFrame（変数名：df）、一時ビュー（tmp_load_delta）
-# 追加メモ
-#   - パス直指定での Delta 読込にも差し替え可能
-#   - （spark.read.format("delta").load(path)）（後述セル参照）
-```
+**目的**
+- Lv1の骨格（データロード→加工→保存）を維持する
+- dbutils.widgets で入力値を切り替え可能にする
+- 手動探索をしやすくしつつ、安全ドロップ・結合キー存在検証を追加
+- “壊れにくい”最小限の堅牢性を付与する
 
-- [Databricks ノートブックでコードを開発する](https://docs.databricks.com/aws/ja/notebooks/notebooks-code)
-  - %md は、マジックコマンド で Markdown を使うことを意味する
+**仕様**
+- 2つの入力テーブルを catalog/schema/table で指定（ウィジェット）
+- 不要列は CSV で指定して削除（存在する列だけ安全に削除）
+- 結合キーは CSV、結合タイプは 選択式（inner/left/right/full）
+- 保存先テーブルを catalog/schema/table で指定、SAVE_MODE（overwrite/append） を選択
+- プレビューは先頭5行とスキーマ、保存後の再読込・確認までを実施
 
-- [Jupyter Notebook マジックコマンド自分的まとめ](https://qiita.com/mgsk_2/items/437656b8ce42c03e41a6)
+**使い方**
+  1. ウィジェットを設定する
+  2. セルを上から順に実行する
+  3. プレビューとスキーマを確認する
 
+**前提**
+- 必須 : SELECT 権限（入力テーブル）
+- 必須 : CREATE/WRITE 権限（保存先スキーマ）
+- 任意 : USE CATALOG / USE SCHEMA できること（本書は完全修飾名で参照する仕様）
 
-## 環境・ランタイム確認
-
-### Databricks Runtimeを確認
-
-```
-print("Spark version :", spark.version)
-print("App Name      :", spark.sparkContext.appName)
-print("Executor cores:", spark.sparkContext.defaultParallelism)
-print("Delta enabled :", spark.conf.get("spark.databricks.delta.preview.enabled", "n/a"))
-```
+**参考**
+- 型揃え：JOIN前に withColumn(... .cast(...)) を使って明示的に合わせる（Lv2では必要時のみ）
+- 保存の堅牢化：Lv3/4以降で CREATE OR REPLACE TABLE ... AS SELECT ...（CRTAS）や MERGE INTO に置換
+- 自動化：Lv3から Jobs 環境変数駆動、Lv4で設定JSON駆動（GitHub管理＋CI配布）、Lv5で制御TBL駆動＋品質ゲート
 
 
-### 便利オプション
 
-- 任意の設定。必要に応じて実施する
+## 実装
+
+### インポートと定数
 
 ```
-spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")  # display() とは無関係、toPandas 時の高速化
-spark.conf.set("spark.sql.adaptive.enabled", "true")                 # AQE（通常既定で有効）
+from typing import List
 ```
 
-## パラメータ（Widgets）
+### ユーティリティ関数
 
-### Widgets を作成
-
-- 既に存在する場合は再作成されません
-
+#### CSV→リスト
 ```
-# テキストボックスを作成する
-dbutils.widgets.text("catalog", "main", "catalog")
-dbutils.widgets.text("schema",  "default", "schema")
-dbutils.widgets.text("table",   "sample_delta", "table")
-
-# 省略時は全列
-dbutils.widgets.text("columns_csv", "", "select columns (csv)")  # 例: "id,name,amount"
-
-# WHERE 句（例: "amount > 100 and status = 'ok'"）
-dbutils.widgets.text("where_expr", "", "where")
-
-# LIMIT 行数（空なら無制限）
-dbutils.widgets.text("limit_n", "", "limit")
-
-# 読み取り後のキャッシュ方法: none/df/table
-dbutils.widgets.dropdown("cache_mode", "none", ["none","df","table"], "cache mode")
+def parse_csv_list(s: str) -> List[str]:
+    if not s:
+        return []
+    return [x.strip() for x in s.split(",") if x.strip()]
 ```
 
-- Azure Learn
-  - [Databricks ウィジェット](https://learn.microsoft.com/ja-jp/azure/databricks/notebooks/widgets)
-  - [widgets ユーティリティ](https://learn.microsoft.com/ja-jp/azure/databricks/dev-tools/databricks-utils#dbutils-widgets)
-    - [dbutils.widgets.text](https://learn.microsoft.com/ja-jp/azure/databricks/dev-tools/databricks-utils#dbutils-widgets-text)
-    - [dbutils.widgets.dropdown](https://learn.microsoft.com/ja-jp/azure/databricks/dev-tools/databricks-utils#dbutils-widgets-dropdown)
-    - [dbutils.widgets.get](https://learn.microsoft.com/ja-jp/azure/databricks/dev-tools/databricks-utils#dbutils-widgets-get)
-
-
-### 取得
-
+#### 完全修飾名の組立て関数
 ```
-catalog     = dbutils.widgets.get("catalog").strip()
-schema      = dbutils.widgets.get("schema").strip()
-table       = dbutils.widgets.get("table").strip()
-columns_csv = dbutils.widgets.get("columns_csv").strip()
-where_expr  = dbutils.widgets.get("where_expr").strip()
-limit_n     = dbutils.widgets.get("limit_n").strip()
-cache_mode  = dbutils.widgets.get("cache_mode").strip().lower()
+def fq(cat: str, sch: str, tbl: str) -> str:
+    # バッククォートで常にクォート（予約語/特殊文字に強い）
+    return f"`{cat}`.`{sch}`.`{tbl}`"
+```
+#### 列の安全ドロップ
+```
+def safe_drop(df, cols: List[str]):
+    # 存在する列だけを削除（存在しない列で失敗しない）
+    existing = [c for c in cols if c in df.columns]
+    return df.drop(*existing) if existing else df
 ```
 
-- Azure Learn
-  - [widgets ユーティリティ](https://learn.microsoft.com/ja-jp/azure/databricks/dev-tools/databricks-utils#dbutils-widgets)
-    - [dbutils.widgets.get](https://learn.microsoft.com/ja-jp/azure/databricks/dev-tools/databricks-utils#dbutils-widgets-get)
-- Python組み込み関数 - [str.strip()](https://docs.python.org/ja/3/library/stdtypes.html#str.strip)
-  - 文字を除去します
-  - 文字列の先頭および末尾を対象に除去します
-  - 引数が省略されるか None の場合、空白文字が除去されます
-- note.nkmk.me - [Pythonの文字列の削除処理一覧](https://note.nkmk.me/python-str-remove-strip/)
-
-
-### 表示
+### ウィジェット定義
 
 ```
-print("Target:", f"{catalog}.{schema}.{table}")
-print("Select:", columns_csv or "*")
-print("Where :", where_expr or "(none)")
-print("Limit :", limit_n or "(none)")
-print("Cache :", cache_mode)
+# 入力テーブル1
+dbutils.widgets.text("SRC1_CATALOG", "main", "SRC1_CATALOG")
+dbutils.widgets.text("SRC1_SCHEMA",  "default", "SRC1_SCHEMA")
+dbutils.widgets.text("SRC1_TABLE",   "sample_delta_1", "SRC1_TABLE")
+dbutils.widgets.text("DROP_COLS_1",  "", "DROP_COLS_1 (csv)")
+
+# 入力テーブル2
+dbutils.widgets.text("SRC2_CATALOG", "main", "SRC2_CATALOG")
+dbutils.widgets.text("SRC2_SCHEMA",  "default", "SRC2_SCHEMA")
+dbutils.widgets.text("SRC2_TABLE",   "sample_delta_2", "SRC2_TABLE")
+dbutils.widgets.text("DROP_COLS_2",  "", "DROP_COLS_2 (csv)")
+
+# 結合
+dbutils.widgets.text("JOIN_KEYS", "id", "JOIN_KEYS (csv)")
+dbutils.widgets.dropdown("JOIN_TYPE", "inner", ["inner","left","right","full"], "JOIN_TYPE")
+
+# 出力テーブル
+dbutils.widgets.text("DST_CATALOG", "main", "DST_CATALOG")
+dbutils.widgets.text("DST_SCHEMA",  "mart", "DST_SCHEMA")
+dbutils.widgets.text("DST_TABLE",   "joined_sample", "DST_TABLE")
+dbutils.widgets.dropdown("SAVE_MODE", "overwrite", ["overwrite","append"], "SAVE_MODE")
 ```
 
-
-## カタログとスキーマを選択
-
-### カレントを合わせる
-
-- 完全修飾名で読む場合は必須ではないが、権限チェックを早期に反映できる
+### ウィジェット取得
 
 ```
-# Current を確認する
-spark.sql("SELECT current_catalog() AS catalog, current_schema() AS schema").show()
+SRC1_CATALOG = dbutils.widgets.get("SRC1_CATALOG").strip()
+SRC1_SCHEMA  = dbutils.widgets.get("SRC1_SCHEMA").strip()
+SRC1_TABLE   = dbutils.widgets.get("SRC1_TABLE").strip()
+DROP_COLS_1  = parse_csv_list(dbutils.widgets.get("DROP_COLS_1"))
 
-# Current Catalog を設定する
-spark.sql(f"USE CATALOG {catalog}")
+SRC2_CATALOG = dbutils.widgets.get("SRC2_CATALOG").strip()
+SRC2_SCHEMA  = dbutils.widgets.get("SRC2_SCHEMA").strip()
+SRC2_TABLE   = dbutils.widgets.get("SRC2_TABLE").strip()
+DROP_COLS_2  = parse_csv_list(dbutils.widgets.get("DROP_COLS_2"))
 
-# Current Schema を設定する
-spark.sql(f"USE {schema}")
+JOIN_KEYS    = parse_csv_list(dbutils.widgets.get("JOIN_KEYS"))
+JOIN_TYPE    = dbutils.widgets.get("JOIN_TYPE").strip()
+
+DST_CATALOG  = dbutils.widgets.get("DST_CATALOG").strip()
+DST_SCHEMA   = dbutils.widgets.get("DST_SCHEMA").strip()
+DST_TABLE    = dbutils.widgets.get("DST_TABLE").strip()
+SAVE_MODE    = dbutils.widgets.get("SAVE_MODE").strip()
+
+print("=== INPUTS ===")
+print("SRC1:", SRC1_CATALOG, SRC1_SCHEMA, SRC1_TABLE, "DROP:", DROP_COLS_1)
+print("SRC2:", SRC2_CATALOG, SRC2_SCHEMA, SRC2_TABLE, "DROP:", DROP_COLS_2)
+print("JOIN:", JOIN_KEYS, JOIN_TYPE)
+print("DEST:", DST_CATALOG, DST_SCHEMA, DST_TABLE, "MODE:", SAVE_MODE)
 ```
-- [フォーマット済文字列 (通称 f-string)](https://docs.python.org/ja/3.8/tutorial/inputoutput.html#formatted-string-literals)
 
+### ロード関数
 
-
-## ロード関数
-
-- LoadDelta の中核
+- Lv1 から変更なし
 
 ```
-from typing import Optional, List
-from pyspark.sql import DataFrame
-
-def load_delta_table(
-    fq_table: str,
-    columns: Optional[List[str]] = None,
-    where: Optional[str] = None,
-    limit: Optional[int] = None,
-    cache: str = "none",   # "none" | "df" | "table"
-) -> DataFrame:
+def load_delta(cat: str = CATALOG, sch: str = SCHEMA, tbl: str = TABLE):
     """
-    fq_table: "catalog.schema.table" の完全修飾名
-    columns : 選択列のリスト（None なら全列）
-    where   : Spark SQL の WHERE 条件文字列
-    limit   : 取得行数（None で無制限）
-    cache   : "none" / "df" / "table"（table は一時ビューにキャッシュ）
+    完全修飾名（catalog.schema.table）で Delta テーブルを取得し、結果を返す。
     """
-
-    # 1) ベース DF
-    df = spark.table(fq_table)
-
-    # 2) 列投影
-    if columns:
-        cols = [c.strip() for c in columns if c.strip()]
-        if not cols:
-            raise ValueError("columns is empty after stripping.")
-        df = df.select(*cols)
-
-    # 3) 条件
-    if where:
-        df = df.where(where)
-
-    # 4) LIMIT
-    if isinstance(limit, int):
-        df = df.limit(limit)
-
-    # 5) キャッシュ
-    if cache == "df":
-        df = df.cache()
-        _ = df.count()  # Materialize
-    elif cache == "table":
-        # 一時ビューにしてテーブルキャッシュ（ビュー名は固定 or 生成）
-        df.createOrReplaceTempView("tmp_load_delta")
-        spark.sql("CACHE LAZY TABLE tmp_load_delta")
-        # 再取得して返す（キャッシュ層を経由）
-        df = spark.table("tmp_load_delta")
-
-    return df
-```
-
-- [PythonでのOptional型の使い方とスクレイピングの実装](https://qiita.com/reikenzaki/items/f9a7bb0ca6875cb0a888)
-
-## ロード実行
-
-```
-# 入力整形
-fq_table = f"{catalog}.{schema}.{table}"
-columns  = [c.strip() for c in columns_csv.split(",")] if columns_csv else None
-limit_i  = int(limit_n) if limit_n.isdigit() else None
-
-# 読込
-df = load_delta_table(
-    fq_table=fq_table,
-    columns=columns,
-    where=where_expr or None,
-    limit=limit_i,
-    cache=cache_mode,
-)
-
-# 基本情報
-print("Rows (approx or limited):", df.count())
-df.printSchema()
-
-# 先頭行（ログ用）
-df.show(20, truncate=False)
-
-# Databricks ネイティブ UI 表示（スクロール・統計などに便利）
-display(df)
+    fq = _fq_name(cat, sch, tbl)
+    return spark.table(fq)
 ```
 
 
-## 簡易プロファイル
-
-- 欠損/ユニーク件数など
-
-```
-from pyspark.sql import functions as F
-
-# 数値列の基本統計
-num_stats = df.select([
-    F.count(F.col(c)).alias(f"{c}__count") for c, t in df.dtypes if t in ("int","bigint","double","float","decimal","long","short")
-])
-display(num_stats)
-
-# 欠損とユニーク数（任意）
-summary = []
-for c, _t in df.dtypes:
-    summary.append(
-        df.agg(
-            F.count(F.col(c)).alias("non_null"),
-            F.countDistinct(F.col(c)).alias("nunique")
-        ).withColumn("column", F.lit(c))
-    )
-profile_df = None
-for s in summary:
-    profile_df = s if profile_df is None else profile_df.unionByName(s)
-profile_df = profile_df.select("column","non_null","nunique")
-display(profile_df.orderBy("column"))
-```
-
-## テンポラリビュー化
-
-- 下流ステップに受け渡し
+### ロード実行する
+- Lv1 から変更なし
 
 ```
-# 以降の SQL セルや別ノートブックで参照できるように
-df.createOrReplaceTempView("tmp_load_delta")
-
-# 例：SQL でプレビュー
-display(spark.sql("SELECT * FROM tmp_load_delta LIMIT 100"))
+# 定数で指定したテーブルをロード
+df1 = load_delta(SRC1_CATALOG, SRC1_SCHEMA, SRC1_TABLE)
+df2 = load_delta(SRC2_CATALOG, SRC2_SCHEMA, SRC2_TABLE)
 ```
 
-## パス直指定での Delta 読込
+### プレビューする
+- プレビュー結果を見て、不要な列を選定します
+- Lv1 から変更なし
 
 ```
-# Unity Catalog 名称ではなく、物理パスで読みたい場合（外部ロケーション/ボリュームなど）
-# 注意：パスは環境に合わせて変更
-delta_path = "/Volumes/mycat/myschema/myvol/some_delta"  # 例
+print("=== SRC1 Columns ===")
+print(df1.columns)
+df1.show(5, truncate=False)
+display(df1)
+df1.printSchema()
 
-df_by_path = spark.read.format("delta").load(delta_path)
-print("Rows by path:", df_by_path.count())
-display(df_by_path.limit(100))
-```
-
-## 後始末
-
-- キャッシュ解除など
-
-```
-# DataFrame キャッシュを明示的にクリアしたい場合
-try:
-    df.unpersist()
-except Exception:
-    pass
-
-# テーブルキャッシュを使った場合
-spark.sql("UNCACHE TABLE tmp_load_delta")
+print("\n=== SRC2 Columns ===")
+print(df2.columns)
+df2.show(5, truncate=False)
+display(df2)
+df2.printSchema()
 ```
 
 
+### 不要列を削除する
+- 新規ユーティリティ関数 safe_drop() を適用
+
+```
+if DROP_COLS_1:
+    df1 = safe_drop(df1, DROP_COLS_1)
+
+if DROP_COLS_2:
+    df2 = safe_drop(df2, DROP_COLS_2)
+
+print("=== After Drop SRC1 Columns ===")
+print(df1.columns)
+print("\n=== After Drop SRC2 Columns ===")
+print(df2.columns)
+```
+
+### 結合する
+- キー検証を追加
+
+```
+# 結合キーの存在チェック
+missing_1 = [c for c in JOIN_KEYS if c not in df1.columns]
+missing_2 = [c for c in JOIN_KEYS if c not in df2.columns]
+if missing_1 or missing_2:
+    raise ValueError(f"Join key not found. df1 missing={missing_1}, df2 missing={missing_2}")
+
+# （任意・簡易）Nullキー検知：必要に応じて厳格化してください
+for k in JOIN_KEYS:
+    null1 = df1.filter(df1[k].isNull()).count()
+    null2 = df2.filter(df2[k].isNull()).count()
+    if null1 > 0 or null2 > 0:
+        print(f"[WARN] Null key detected on '{k}': df1={null1}, df2={null2}")
+
+df_joined = df1.join(df2, on=JOIN_KEYS, how=JOIN_TYPE)
+
+print("=== Joined Columns ===")
+print(df_joined.columns)
+df_joined.show(10, truncate=False)
+display(df_joined)
+```
+
+### Deltaテーブルに保存する
+
+```
+dst_fq = fq(DST_CATALOG, DST_SCHEMA, DST_TABLE)
+
+# テーブルとして保存（Unity Catalog配下を想定）
+df_joined.write.format("delta").mode(SAVE_MODE).saveAsTable(dst_fq)
+print(f"Saved to {dst_fq} (mode={SAVE_MODE})")
+
+# 保存結果を確認
+df_out = spark.table(dst_fq)
+print("=== Output Preview ===")
+df_out.show(10, truncate=False)
+
+print("\n=== Output Schema ===")
+df_out.printSchema()
+display(df_out)
+```
 
