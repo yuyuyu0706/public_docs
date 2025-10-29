@@ -1,4 +1,4 @@
-# Deltaテーブル基本操作 Lv5 外部設定ファイル駆動 & CI配布
+# Deltaテーブル基本操作 Lv5 制御TBL駆動／品質ゲート／実行記録
 
 ## 概要
 
@@ -396,4 +396,23 @@ config.LOG_TABLE=pipeline_runs
 config.PIPELINE_ID=load_join_save_01
 config.ENV=prd（任意）
 ```
+
+## 参考
+
+### 実行ログ は TBL か ファイルか？
+
+- まず System Tables を有効化し、標準のジョブ可視化はそれで賄う。
+- パイプライン専用のログは Delta に正規保存（あなたの Lv5 テンプレ通り）。
+- 超高頻度な明細は一時ファイル
+  - 定期取り込み（Auto Loader/COPY INTO）
+  - Delta。取り込み後は OPTIMIZE 等で整備。
+- 長期保管が必要な System Tables 相当の情報は、期限前にエクスポート（保持 60 日の注意）
+- ログ分析/ダッシュボードは Delta（＋System Tables） を統合参照
+- Databricks 公式ブログも構造化ログの集中管理を推奨しています 
+
+> まとめ：“見える化は System Tables、運用の真実は Delta テーブル”。
+> ファイルは“受け皿”に留め、最終的には Delta に寄せるのが Databricks 流です。
+
+
+
 
